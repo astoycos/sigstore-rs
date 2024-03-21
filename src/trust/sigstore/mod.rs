@@ -51,6 +51,10 @@ use crate::errors::{Result, SigstoreError};
 
 pub use crate::trust::{ManualTrustRoot, TrustRoot};
 
+use async_trait::async_trait;
+use futures::StreamExt;
+use futures_core::Stream;
+
 /// Securely fetches Rekor public key and Fulcio certificates from Sigstore's TUF repository.
 #[derive(Debug)]
 pub struct SigstoreTrustRoot {
@@ -61,15 +65,16 @@ pub struct SigstoreTrustRoot {
 
 impl SigstoreTrustRoot {
     /// Constructs a new trust repository established by a [tough::Repository].
-    pub fn new(checkout_dir: Option<&Path>) -> Result<Self> {
+    pub async fn new(checkout_dir: Option<&Path>) -> Result<Self> {
         // These are statically defined and should always parse correctly.
         let metadata_base = url::Url::parse(constants::SIGSTORE_METADATA_BASE)?;
         let target_base = url::Url::parse(constants::SIGSTORE_TARGET_BASE)?;
 
         let repository =
-            tough::RepositoryLoader::new(constants::SIGSTORE_ROOT, metadata_base, target_base)
+            tough::RepositoryLoader::new(&constants::SIGSTORE_ROOT, metadata_base, target_base)
                 .expiration_enforcement(tough::ExpirationEnforcement::Safe)
                 .load()
+                .await
                 .map_err(Box::new)?;
 
         Ok(Self {
@@ -79,8 +84,8 @@ impl SigstoreTrustRoot {
         })
     }
 
-    fn trusted_root(&self) -> Result<&TrustedRoot> {
-        fn init_trusted_root(
+    async fn trusted_root(&self) -> Result<&TrustedRoot> {
+        async fn init_trusted_root(
             repository: &tough::Repository,
             checkout_dir: Option<&PathBuf>,
         ) -> Result<TrustedRoot> {
@@ -91,7 +96,8 @@ impl SigstoreTrustRoot {
                 repository,
                 &trusted_root_target,
                 local_path.as_ref(),
-            )?;
+            )
+            .await?;
 
             debug!("data:\n{}", String::from_utf8_lossy(&data));
 
@@ -102,7 +108,7 @@ impl SigstoreTrustRoot {
             return Ok(root);
         }
 
-        let root = init_trusted_root(&self.repository, self.checkout_dir.as_ref())?;
+        let root = init_trusted_root(&self.repository, self.checkout_dir.as_ref()).await?;
         Ok(self.trusted_root.get_or_init(|| root))
     }
 
@@ -123,8 +129,8 @@ impl SigstoreTrustRoot {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn prefetch(self) -> Result<Self> {
-        let _ = self.trusted_root()?;
+    pub async fn prefetch(self) -> Result<Self> {
+        let _ = self.trusted_root().await?;
         Ok(self)
     }
 
@@ -149,6 +155,8 @@ impl SigstoreTrustRoot {
     }
 }
 
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl crate::trust::TrustRoot for SigstoreTrustRoot {
     /// Fetch Fulcio certificates from the given TUF repository or reuse
     /// the local cache if its contents are not outdated.
@@ -157,8 +165,8 @@ impl crate::trust::TrustRoot for SigstoreTrustRoot {
     ///
     /// **Warning:** this method needs special handling when invoked from
     /// an async function because it performs blocking operations.
-    fn fulcio_certs(&self) -> Result<Vec<CertificateDer>> {
-        let root = self.trusted_root()?;
+    async fn fulcio_certs(&self) -> Result<Vec<CertificateDer>> {
+        let root = self.trusted_root().await?;
 
         // Allow expired certificates: they may have been active when the
         // certificate was used to sign.
@@ -178,11 +186,8 @@ impl crate::trust::TrustRoot for SigstoreTrustRoot {
     /// the local cache if it's not outdated.
     ///
     /// The contents of the local cache are updated when they are outdated.
-    ///
-    /// **Warning:** this method needs special handling when invoked from
-    /// an async function because it performs blocking operations.
-    fn rekor_keys(&self) -> Result<Vec<&[u8]>> {
-        let root = self.trusted_root()?;
+    async fn rekor_keys(&self) -> Result<Vec<&[u8]>> {
+        let root = self.trusted_root().await?;
         let keys: Vec<_> = Self::tlog_keys(&root.tlogs).collect();
 
         if keys.len() != 1 {
@@ -230,7 +235,7 @@ fn is_timerange_valid(range: Option<&TimeRange>, allow_expired: bool) -> bool {
 ///
 /// **Note well:** the `local_file` is updated whenever its contents are
 /// outdated.
-fn fetch_target_or_reuse_local_cache(
+async fn fetch_target_or_reuse_local_cache(
     repository: &tough::Repository,
     target_name: &TargetName,
     local_file: Option<&PathBuf>,
@@ -242,7 +247,7 @@ fn fetch_target_or_reuse_local_cache(
     }?;
 
     let data = if local_file_outdated {
-        let data = fetch_target(repository, target_name)?;
+        let data = fetch_target(repository, target_name).await?;
         if let Some(path) = local_file {
             // update the local file to have latest data from the TUF repo
             fs::write(path, data.clone())?;
@@ -259,16 +264,17 @@ fn fetch_target_or_reuse_local_cache(
 }
 
 /// Download a file from a TUF repository
-fn fetch_target(repository: &tough::Repository, target_name: &TargetName) -> Result<Vec<u8>> {
+async fn fetch_target(repository: &tough::Repository, target_name: &TargetName) -> Result<Vec<u8>> {
     let data: Vec<u8>;
-    match repository.read_target(target_name).map_err(Box::new)? {
+    match repository
+        .read_target(target_name)
+        .await
+        .map_err(Box::new)?
+    {
         None => Err(SigstoreError::TufTargetNotFoundError(
             target_name.raw().to_string(),
         )),
-        Some(reader) => {
-            data = read_to_end(reader)?;
-            Ok(data)
-        }
+        Some(mut reader) => Ok(reader.next().await.unwrap().map_err(Box::new)?.to_vec()),
     }
 }
 
