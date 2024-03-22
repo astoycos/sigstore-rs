@@ -73,8 +73,6 @@
 //! // verify
 //! assert!(verification_key.verify_signature(Signature::Raw(&signature_data),message).is_ok());
 /// ```
-use p256;
-
 use crate::errors::*;
 
 use self::ec::{EcdsaKeys, EcdsaSigner};

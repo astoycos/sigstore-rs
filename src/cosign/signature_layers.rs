@@ -17,7 +17,6 @@ use const_oid::ObjectIdentifier;
 use digest::Digest;
 use oci_distribution::client::ImageLayer;
 use serde::Serialize;
-use std::convert::TryFrom;
 use std::{collections::HashMap, fmt};
 use tracing::{debug, info, warn};
 use x509_cert::der::DecodePem;

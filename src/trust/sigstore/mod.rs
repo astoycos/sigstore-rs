@@ -31,10 +31,9 @@
 //! let repo = SigstoreTrustRoot::new(None).unwrap().prefetch().unwrap();
 //! ```
 use std::{
-    cell::OnceCell,
     fs,
-    io::Read,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 mod constants;
@@ -53,14 +52,13 @@ pub use crate::trust::{ManualTrustRoot, TrustRoot};
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use futures_core::Stream;
 
 /// Securely fetches Rekor public key and Fulcio certificates from Sigstore's TUF repository.
 #[derive(Debug)]
 pub struct SigstoreTrustRoot {
     repository: tough::Repository,
     checkout_dir: Option<PathBuf>,
-    trusted_root: OnceCell<TrustedRoot>,
+    trusted_root: OnceLock<TrustedRoot>,
 }
 
 impl SigstoreTrustRoot {
@@ -80,7 +78,7 @@ impl SigstoreTrustRoot {
         Ok(Self {
             repository,
             checkout_dir: checkout_dir.map(ToOwned::to_owned),
-            trusted_root: OnceCell::default(),
+            trusted_root: OnceLock::default(),
         })
     }
 
@@ -162,9 +160,6 @@ impl crate::trust::TrustRoot for SigstoreTrustRoot {
     /// the local cache if its contents are not outdated.
     ///
     /// The contents of the local cache are updated when they are outdated.
-    ///
-    /// **Warning:** this method needs special handling when invoked from
-    /// an async function because it performs blocking operations.
     async fn fulcio_certs(&self) -> Result<Vec<CertificateDer>> {
         let root = self.trusted_root().await?;
 
@@ -265,7 +260,6 @@ async fn fetch_target_or_reuse_local_cache(
 
 /// Download a file from a TUF repository
 async fn fetch_target(repository: &tough::Repository, target_name: &TargetName) -> Result<Vec<u8>> {
-    let data: Vec<u8>;
     match repository
         .read_target(target_name)
         .await
@@ -274,7 +268,14 @@ async fn fetch_target(repository: &tough::Repository, target_name: &TargetName) 
         None => Err(SigstoreError::TufTargetNotFoundError(
             target_name.raw().to_string(),
         )),
-        Some(mut reader) => Ok(reader.next().await.unwrap().map_err(Box::new)?.to_vec()),
+        Some(mut stream) => {
+            let mut data = vec![];
+            while let Some(d) = stream.next().await {
+                let mut d = Into::<Vec<u8>>::into(d.map_err(Box::new)?);
+                data.append(&mut d);
+            }
+            Ok(data)
+        }
     }
 }
 
@@ -308,9 +309,17 @@ fn is_local_file_outdated(
     }
 }
 
-/// Gets the goods from a read and makes a Vec
-fn read_to_end<R: Read>(mut reader: R) -> Result<Vec<u8>> {
-    let mut v = Vec::new();
-    reader.read_to_end(&mut v)?;
-    Ok(v)
+#[cfg(test)]
+mod tests {
+    use crate::sigstore::sigstore::SigstoreTrustRoot;
+
+    #[tokio::test]
+    async fn prefetch() {
+        let _repo = SigstoreTrustRoot::new(None)
+            .await
+            .expect("initialize SigstoreRepository")
+            .prefetch()
+            .await
+            .expect("prefetch");
+    }
 }

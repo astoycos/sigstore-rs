@@ -21,8 +21,8 @@ pub mod sigstore;
 
 /// A `TrustRoot` owns all key material necessary for establishing a root of trust.
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-pub trait TrustRoot {
+#[cfg_attr(target_arch = "wasm3x2", async_trait(?Send))]
+pub trait TrustRoot: Send + Sync {
     async fn fulcio_certs(&self) -> crate::errors::Result<Vec<CertificateDer>>;
     async fn rekor_keys(&self) -> crate::errors::Result<Vec<&[u8]>>;
 }

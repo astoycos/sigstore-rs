@@ -16,7 +16,6 @@
 //! Structures and constants required to perform cryptographic operations.
 
 use sha2::{Sha256, Sha384};
-use std::convert::TryFrom;
 
 use crate::errors::*;
 
